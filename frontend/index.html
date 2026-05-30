@@ -1,0 +1,518 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Handwriting CNN Visualizer</title>
+
+    <style>
+        body {
+            margin: 0;
+            font-family: Arial, sans-serif;
+            background: #f4f6f8;
+            color: #222;
+        }
+
+        .container {
+            display: grid;
+            grid-template-columns: 1fr 360px;
+            gap: 24px;
+            padding: 24px;
+            height: 100vh;
+            box-sizing: border-box;
+        }
+
+        .left-panel,
+        .right-panel {
+            background: white;
+            border-radius: 16px;
+            padding: 20px;
+            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.08);
+            overflow-y: auto;
+        }
+
+        h1 {
+            margin-top: 0;
+            font-size: 24px;
+        }
+
+        h2 {
+            margin-top: 24px;
+            font-size: 18px;
+        }
+
+        .prediction-box {
+            font-size: 22px;
+            font-weight: bold;
+            margin-bottom: 8px;
+        }
+
+        .confidence-box {
+            font-size: 15px;
+            color: #555;
+        }
+
+        .bar-row {
+            display: grid;
+            grid-template-columns: 36px 1fr 60px;
+            align-items: center;
+            gap: 8px;
+            margin: 6px 0;
+        }
+
+        .bar-bg {
+            height: 18px;
+            background: #e8e8e8;
+            border-radius: 9px;
+            overflow: hidden;
+        }
+
+        .bar-fill {
+            height: 100%;
+            background: #4f46e5;
+            width: 0%;
+            transition: width 0.12s linear;
+        }
+
+        .processed-input-box {
+            margin-top: 20px;
+        }
+
+        .processed-input-box img {
+            width: 112px;
+            height: 112px;
+            border-radius: 4px;
+            border: 1px solid #ddd;
+            background: black;
+            image-rendering: pixelated;
+            object-fit: fill;
+        }
+
+        .feature-section {
+            margin-top: 20px;
+        }
+
+        .feature-grid {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 14px;
+            align-items: flex-start;
+        }
+
+        .feature-item {
+            text-align: center;
+            font-size: 12px;
+            color: #555;
+            min-width: 110px;
+        }
+
+        .feature-item img {
+            width: 112px;
+            height: 112px;
+            border-radius: 4px;
+            border: 1px solid #ddd;
+            image-rendering: pixelated;
+            background: black;
+            object-fit: fill;
+            display: block;
+            margin: 0 auto 6px auto;
+        }
+
+        .canvas-wrapper {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+
+        #draw-canvas {
+            width: 280px;
+            height: 280px;
+            border: 2px solid #111;
+            border-radius: 12px;
+            background: black;
+            cursor: crosshair;
+            touch-action: none;
+        }
+
+        .button-row {
+            margin-top: 16px;
+            display: flex;
+            gap: 12px;
+        }
+
+        button {
+            border: none;
+            padding: 10px 18px;
+            border-radius: 10px;
+            cursor: pointer;
+            font-size: 15px;
+        }
+
+        .clear-btn {
+            background: #ef4444;
+            color: white;
+        }
+
+        .status {
+            margin-top: 12px;
+            font-size: 13px;
+            color: #666;
+        }
+
+        .hint {
+            font-size: 14px;
+            color: #666;
+            line-height: 1.6;
+        }
+    </style>
+</head>
+
+<body>
+<div class="container">
+    <div class="left-panel">
+        <h1>CNN Real-time Visualization</h1>
+
+        <div class="prediction-box">
+            Prediction: <span id="prediction">-</span>
+        </div>
+
+        <div class="confidence-box">
+            Confidence: <span id="confidence">-</span>
+        </div>
+
+        <h2>Probability</h2>
+        <div id="probability-bars"></div>
+
+        <div class="processed-input-box">
+            <h2>Model Input</h2>
+            <img id="processed-input" alt="processed 28x28 input">
+            <div id="processed-input-label" class="status">Actual model input: -</div>
+        </div>
+
+        <div class="feature-section">
+            <h2>Conv1 Feature Maps</h2>
+            <div id="conv1-grid" class="feature-grid"></div>
+        </div>
+
+        <div class="feature-section">
+            <h2>Conv2 Feature Maps</h2>
+            <div id="conv2-grid" class="feature-grid"></div>
+        </div>
+    </div>
+
+    <div class="right-panel">
+        <h1>Draw Here</h1>
+
+        <p class="hint">
+            Draw one digit on the 280×280 canvas.
+            The backend will crop, resize, and center it into a 28×28 model input.
+        </p>
+
+        <div class="canvas-wrapper">
+            <canvas id="draw-canvas" width="280" height="280"></canvas>
+
+            <div class="button-row">
+                <button class="clear-btn" onclick="clearCanvas()">Clear</button>
+            </div>
+
+            <div class="status">
+                Canvas size: 280×280
+            </div>
+
+            <div class="status">
+                Model input size: 28×28
+            </div>
+
+            <div class="status">
+                Device: <span id="device">-</span>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+    const canvas = document.getElementById("draw-canvas");
+    const ctx = canvas.getContext("2d");
+
+    let isDrawing = false;
+    let lastX = 0;
+    let lastY = 0;
+
+    let lastPredictTime = 0;
+    const predictInterval = 150;
+
+    let requestId = 0;
+    let latestHandledRequestId = 0;
+    let isRequesting = false;
+    let needPredictAfterCurrent = false;
+
+    let displayedProbabilities = null;
+    const smoothFactor = 0.28;
+
+    let probabilityBarsInitialized = false;
+
+    function initCanvas() {
+        ctx.fillStyle = "black";
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+        ctx.strokeStyle = "white";
+        ctx.lineWidth = 20;
+        ctx.lineCap = "round";
+        ctx.lineJoin = "round";
+    }
+
+    function getMousePos(event) {
+        const rect = canvas.getBoundingClientRect();
+
+        return {
+            x: (event.clientX - rect.left) * canvas.width / rect.width,
+            y: (event.clientY - rect.top) * canvas.height / rect.height
+        };
+    }
+
+    canvas.addEventListener("mousedown", (event) => {
+        isDrawing = true;
+
+        const pos = getMousePos(event);
+        lastX = pos.x;
+        lastY = pos.y;
+
+        requestPredict();
+    });
+
+    canvas.addEventListener("mousemove", (event) => {
+        if (!isDrawing) return;
+
+        const pos = getMousePos(event);
+
+        ctx.beginPath();
+        ctx.moveTo(lastX, lastY);
+        ctx.lineTo(pos.x, pos.y);
+        ctx.stroke();
+
+        lastX = pos.x;
+        lastY = pos.y;
+
+        const now = Date.now();
+        if (now - lastPredictTime > predictInterval) {
+            lastPredictTime = now;
+            requestPredict();
+        }
+    });
+
+    canvas.addEventListener("mouseup", () => {
+        isDrawing = false;
+        requestPredict();
+    });
+
+    canvas.addEventListener("mouseleave", () => {
+        isDrawing = false;
+    });
+
+    function clearCanvas() {
+        initCanvas();
+
+        document.getElementById("prediction").innerText = "-";
+        document.getElementById("confidence").innerText = "-";
+        document.getElementById("probability-bars").innerHTML = "";
+        document.getElementById("conv1-grid").innerHTML = "";
+        document.getElementById("conv2-grid").innerHTML = "";
+        document.getElementById("device").innerText = "-";
+
+        const processedInput = document.getElementById("processed-input");
+        processedInput.removeAttribute("src");
+        document.getElementById("processed-input-label").innerText =
+            "Actual model input: -";
+
+        displayedProbabilities = null;
+        probabilityBarsInitialized = false;
+
+        requestId = 0;
+        latestHandledRequestId = 0;
+        isRequesting = false;
+        needPredictAfterCurrent = false;
+    }
+
+    function requestPredict() {
+        if (isRequesting) {
+            needPredictAfterCurrent = true;
+            return;
+        }
+
+        predict();
+    }
+
+    async function predict() {
+        isRequesting = true;
+
+        const currentRequestId = ++requestId;
+        const imageData = canvas.toDataURL("image/png");
+
+        try {
+            const response = await fetch("/predict", {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json"
+                },
+                body: JSON.stringify({
+                    image: imageData
+                })
+            });
+
+            const data = await response.json();
+
+            if (currentRequestId < latestHandledRequestId) {
+                return;
+            }
+
+            latestHandledRequestId = currentRequestId;
+
+            const smoothedProbabilities = smoothProbabilities(data.probabilities);
+
+            // 关键修改：
+            // Prediction 和 Confidence 使用后端原始结果，不使用平滑后的概率。
+            updatePrediction(data);
+
+            // 概率柱形图仍然使用平滑后的概率，这样显示更顺滑。
+            updateProbabilityBars(smoothedProbabilities);
+
+            updateProcessedInput(data.processed_input);
+
+            updateFeatureMaps("conv1-grid", data.feature_maps.conv1);
+            updateFeatureMaps("conv2-grid", data.feature_maps.conv2);
+
+            document.getElementById("device").innerText = data.device;
+
+        } catch (error) {
+            console.error("Prediction failed:", error);
+        } finally {
+            isRequesting = false;
+
+            if (needPredictAfterCurrent) {
+                needPredictAfterCurrent = false;
+                predict();
+            }
+        }
+    }
+
+    function updatePrediction(data) {
+        document.getElementById("prediction").innerText = data.prediction;
+        document.getElementById("confidence").innerText =
+            (data.confidence * 100).toFixed(2) + "%";
+    }
+
+    function smoothProbabilities(newProbabilities) {
+        if (displayedProbabilities === null) {
+            displayedProbabilities = newProbabilities.map(item => ({
+                class_name: item.class_name,
+                probability: item.probability
+            }));
+
+            return displayedProbabilities;
+        }
+
+        displayedProbabilities = newProbabilities.map((item, index) => {
+            const oldProbability = displayedProbabilities[index].probability;
+            const newProbability = item.probability;
+
+            return {
+                class_name: item.class_name,
+                probability:
+                    oldProbability * (1 - smoothFactor) +
+                    newProbability * smoothFactor
+            };
+        });
+
+        return displayedProbabilities;
+    }
+
+    function initializeProbabilityBars(probabilities) {
+        const container = document.getElementById("probability-bars");
+        container.innerHTML = "";
+
+        probabilities.forEach((item, index) => {
+            const row = document.createElement("div");
+            row.className = "bar-row";
+
+            const label = document.createElement("div");
+            label.innerText = item.class_name;
+
+            const barBg = document.createElement("div");
+            barBg.className = "bar-bg";
+
+            const barFill = document.createElement("div");
+            barFill.className = "bar-fill";
+            barFill.id = `prob-bar-${index}`;
+            barFill.style.width = "0%";
+
+            barBg.appendChild(barFill);
+
+            const value = document.createElement("div");
+            value.id = `prob-value-${index}`;
+            value.innerText = "0.0%";
+
+            row.appendChild(label);
+            row.appendChild(barBg);
+            row.appendChild(value);
+
+            container.appendChild(row);
+        });
+
+        probabilityBarsInitialized = true;
+    }
+
+    function updateProbabilityBars(probabilities) {
+        if (!probabilityBarsInitialized) {
+            initializeProbabilityBars(probabilities);
+        }
+
+        probabilities.forEach((item, index) => {
+            const bar = document.getElementById(`prob-bar-${index}`);
+            const value = document.getElementById(`prob-value-${index}`);
+
+            const percent = item.probability * 100;
+
+            bar.style.width = percent.toFixed(2) + "%";
+            value.innerText = percent.toFixed(1) + "%";
+        });
+    }
+
+    function updateProcessedInput(src) {
+        const img = document.getElementById("processed-input");
+        img.src = src;
+
+        img.onload = () => {
+            document.getElementById("processed-input-label").innerText =
+                "Actual model input: " + img.naturalWidth + "×" + img.naturalHeight;
+        };
+    }
+
+    function updateFeatureMaps(containerId, images) {
+        const container = document.getElementById(containerId);
+        container.innerHTML = "";
+
+        images.forEach((src, index) => {
+            const item = document.createElement("div");
+            item.className = "feature-item";
+
+            const img = document.createElement("img");
+            img.src = src;
+
+            const label = document.createElement("div");
+            label.innerText = "ch " + index;
+
+            img.onload = () => {
+                label.innerText =
+                    "ch " + index + " (" + img.naturalWidth + "×" + img.naturalHeight + ")";
+            };
+
+            item.appendChild(img);
+            item.appendChild(label);
+
+            container.appendChild(item);
+        });
+    }
+
+    initCanvas();
+</script>
+</body>
+</html>
